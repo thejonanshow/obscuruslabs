@@ -1,7 +1,26 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npx create-next-app@latest . --typescript --tailwind --eslint --app --src-dir --no-import-alias --use-npm)"
+      "Bash(npx create-next-app@latest . --typescript --tailwind --eslint --app --src-dir --no-import-alias --use-npm)",
+      "Bash(convert -size 1920x1080 xc:'#1a1a1a' -gravity center -fill '#666' -pointsize 48 -annotate 0 'visor-off.jpg placeholder' public/visor-off.jpg)",
+      "Bash(npx tsc:*)",
+      "Bash(npx next:*)",
+      "Bash(kill 6466)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(npm install:*)",
+      "Bash(ls /Users/jonan/src/obscuruslabs/postcss.config.* /Users/jonan/src/obscuruslabs/tailwind.config.*)",
+      "Bash(NEXT_TURBOPACK=0 npx next build)",
+      "Bash(npm --version)",
+      "Bash(ls /Users/jonan/src/obscuruslabs/node_modules/.pnpm/next@*/node_modules/next/dist/lib/server-external-packages*)",
+      "Bash(ls /Users/jonan/src/obscuruslabs/node_modules/next/dist/lib/server-external-packages*)",
+      "Bash(pnpm add:*)",
+      "Bash(ln -s server-external-packages.json server-external-packages.jsonc)",
+      "Bash(pnpm install:*)",
+      "Bash(node_modules/.bin/next build:*)",
+      "Bash(ls node_modules/.pnpm/*.yaml)",
+      "Bash(ls -d node_modules/.pnpm/next@*)",
+      "Bash(ls node_modules/next/dist/lib/server-external-packages*)",
+      "Bash(node_modules/.bin/next --version)"
     ]
   }
 }
