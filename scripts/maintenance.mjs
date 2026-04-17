@@ -1,27 +1,29 @@
 #!/usr/bin/env node
-// Toggle the production site between coming-soon ("maintenance on") and the
-// full storefront ("maintenance off"). Wraps `flyctl secrets set` so the
-// operation is one command instead of four environment variables to remember.
+// Toggle SITE_MODE between "coming_soon" and "full" on a Fly app. That is the
+// only thing this script flips — NOINDEX is an *environment* property
+// (staging should always be noindex; prod is noindex until we launch), set via
+// `[env]` in fly.toml / fly.staging.toml, not here.
 //
 // Usage:
-//   pnpm maintenance on             # hide the site behind the coming-soon page
-//   pnpm maintenance off            # launch — show the full storefront
-//   pnpm maintenance status         # show current SITE_MODE / NOINDEX
+//   pnpm maintenance on             # show the coming-soon page
+//   pnpm maintenance off            # show the full storefront
+//   pnpm maintenance status         # print current SITE_MODE / NOINDEX
 //   pnpm maintenance on --app=...   # target a specific Fly app (default: obscuruslabs)
 //
 // Flags:
 //   --app=<name>   Fly app to target (default "obscuruslabs")
-//   --yes          Skip the launch-confirmation prompt
+//   --yes          Skip the launch-confirmation prompt when turning OFF on prod
 //   --dry-run      Print the flyctl command that would run, do nothing
 //
-// Requires FLY_API_TOKEN in the environment (or a logged-in flyctl).
+// Auth: uses whatever flyctl already has (env var, or `flyctl auth login`
+// config). Run `flyctl auth whoami` to check who you are.
 
 import { spawn, spawnSync } from 'node:child_process';
-import { readFileSync, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 
 const DEFAULT_APP = 'obscuruslabs';
+const PROD_APP = 'obscuruslabs';
 const VALID_ACTIONS = new Set(['on', 'off', 'status']);
 
 function parseArgs(argv) {
@@ -41,17 +43,6 @@ function parseArgs(argv) {
     yes: flags.yes === true,
     dryRun: flags['dry-run'] === true,
   };
-}
-
-function loadDotenvTokens() {
-  // If FLY_API_TOKEN is already set, leave it alone. Otherwise try the repo's
-  // .env (which stores FLYIO_API_KEY) so the script works out of the box.
-  if (process.env.FLY_API_TOKEN) return;
-  const envPath = new URL('../.env', import.meta.url);
-  if (!existsSync(envPath)) return;
-  const raw = readFileSync(envPath, 'utf8');
-  const match = raw.match(/^FLYIO_API_KEY\s*=\s*"?([^"\n]+)"?/m);
-  if (match) process.env.FLY_API_TOKEN = match[1];
 }
 
 function pickFlyctl() {
@@ -76,11 +67,14 @@ function runFlyctl({ cmd, args }, subArgs, { capture = false } = {}) {
   });
 }
 
+// Strip ANSI escapes that flyctl uses for bold headers.
+function stripAnsi(s) {
+  return s.replace(/\x1B\[[0-9;]*m/g, '');
+}
+
 function parseSecretsList(stdout) {
-  // `flyctl secrets list` is a plain table. We only need the NAME column to
-  // know whether a key exists (values are never returned by the API).
   const names = new Set();
-  for (const line of stdout.split('\n')) {
+  for (const line of stripAnsi(stdout).split('\n')) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('NAME')) continue;
     const name = trimmed.split(/\s+/)[0];
@@ -89,18 +83,27 @@ function parseSecretsList(stdout) {
   return names;
 }
 
+// `flyctl config env` prints two sections: "Secrets" and "Environment
+// Variables". We only want the second. Each row looks like:
+//   NEXT_PUBLIC_SITE_URL │ https://stg.obscuruslabs.com
 function parseConfigEnv(stdout) {
-  // `flyctl config env -j` prints JSON { "env": { "KEY": "value", ... } }.
-  try {
-    const parsed = JSON.parse(stdout);
-    return parsed.env ?? {};
-  } catch {
-    return {};
+  const env = {};
+  const clean = stripAnsi(stdout);
+  const idx = clean.indexOf('Environment Variables');
+  if (idx < 0) return env;
+  const section = clean.slice(idx).split('\n').slice(1); // drop the header line
+  for (const line of section) {
+    const t = line.trim();
+    if (!t || t.startsWith('NAME')) continue;
+    const [name, ...rest] = t.split('│');
+    if (!name || rest.length === 0) continue;
+    env[name.trim()] = rest.join('│').trim();
   }
+  return env;
 }
 
 async function status(flyctl, app) {
-  const envResult = runFlyctl(flyctl, ['config', 'env', '-j', '-a', app], { capture: true });
+  const envResult = runFlyctl(flyctl, ['config', 'env', '-a', app], { capture: true });
   const secretsResult = runFlyctl(flyctl, ['secrets', 'list', '-a', app], { capture: true });
 
   const env = parseConfigEnv(envResult.stdout ?? '');
@@ -113,11 +116,17 @@ async function status(flyctl, app) {
   console.log('');
   console.log(`  app:         ${app}`);
   console.log(`  SITE_MODE:   ${siteMode}`);
-  console.log(`  NOINDEX:     ${noindex}`);
+  console.log(`  NOINDEX:     ${noindex}  ${noindex === 'true' ? '(not indexed)' : noindex === 'false' ? '(INDEXED)' : ''}`);
   console.log(`  mode:        ${isMaintenance ? 'MAINTENANCE (coming-soon)' : 'LIVE (full storefront)'}`);
   console.log('');
   console.log(`  secrets set: ${[...secrets].sort().join(', ') || '(none)'}`);
   console.log('');
+
+  if (app === PROD_APP && !isMaintenance && noindex === 'true') {
+    console.log('  NOTE: prod is LIVE but still noindex. To allow indexing at launch:');
+    console.log(`    flyctl secrets unset -a ${app} NOINDEX  # or set NOINDEX=false`);
+    console.log('');
+  }
 }
 
 async function confirm(question) {
@@ -127,22 +136,14 @@ async function confirm(question) {
   return answer === 'yes';
 }
 
-async function setMode(flyctl, app, { siteMode, noindex, dryRun, skipConfirm, actionLabel }) {
-  const secretArgs = [
-    'secrets',
-    'set',
-    '-a',
-    app,
-    '--stage=false',
-    `SITE_MODE=${siteMode}`,
-    `NOINDEX=${noindex}`,
-  ];
+async function setSiteMode(flyctl, app, { siteMode, dryRun, skipConfirm, actionLabel }) {
+  const secretArgs = ['secrets', 'set', '-a', app, '--stage=false', `SITE_MODE=${siteMode}`];
 
   console.log('');
   console.log(`  Action:      ${actionLabel}`);
   console.log(`  App:         ${app}`);
   console.log(`  SITE_MODE →  ${siteMode}`);
-  console.log(`  NOINDEX →    ${noindex}`);
+  console.log(`  NOINDEX →    (unchanged — set via [env] in fly.{staging,}.toml)`);
   console.log('');
 
   if (dryRun) {
@@ -150,8 +151,9 @@ async function setMode(flyctl, app, { siteMode, noindex, dryRun, skipConfirm, ac
     return;
   }
 
-  if (siteMode === 'full' && !skipConfirm) {
-    console.log('  This LAUNCHES the public site. Search engines will be allowed to index.');
+  if (siteMode === 'full' && app === PROD_APP && !skipConfirm) {
+    console.log('  This shows the full storefront on PROD.');
+    console.log('  (Indexing is still controlled by NOINDEX — see `pnpm maintenance status`.)');
     const ok = await confirm('  Proceed?');
     if (!ok) {
       console.log('  Aborted.');
@@ -171,7 +173,6 @@ async function main() {
     process.exit(2);
   }
 
-  loadDotenvTokens();
   const flyctl = pickFlyctl();
 
   if (action === 'status') {
@@ -180,9 +181,8 @@ async function main() {
   }
 
   if (action === 'on') {
-    await setMode(flyctl, app, {
+    await setSiteMode(flyctl, app, {
       siteMode: 'coming_soon',
-      noindex: 'true',
       dryRun,
       skipConfirm: yes,
       actionLabel: 'maintenance ON — coming-soon page',
@@ -191,12 +191,11 @@ async function main() {
   }
 
   if (action === 'off') {
-    await setMode(flyctl, app, {
+    await setSiteMode(flyctl, app, {
       siteMode: 'full',
-      noindex: 'false',
       dryRun,
       skipConfirm: yes,
-      actionLabel: 'maintenance OFF — launch full site',
+      actionLabel: 'maintenance OFF — full storefront',
     });
   }
 }
